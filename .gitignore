@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TouchDesigner backup/temp files
+*.toe.autosave
+*.toe.backup
+Backup/
+backup/
+
+# Logs / temp
+*.log
+*.tmp
+temp/
+tmp/
+
+# Local testing
+sandbox/
