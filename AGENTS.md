@@ -688,3 +688,70 @@ If a major architectural change appears necessary, explain why before
 
 performing it.
 
+## Canonical identity
+
+YOLO object tracking and pose tracking use independent tracker namespaces.
+
+Never assume that object ID 1 and pose ID 1 represent the same entity.
+
+Canonical records must identify their source/stream in addition to preserving
+the upstream ID.
+
+A globally meaningful key is therefore `(source_type, id)`, not `id` alone.
+
+Do not attempt to associate object detections with pose detections unless an
+explicit association component is implemented later.
+
+
+## Canonical coordinate system
+
+TDVisionHelpers canonical image coordinates are normalized 0.0..1.0.
+
+Origin: bottom-left.
+
+X increases left-to-right.
+Y increases bottom-to-top.
+
+Adapters are responsible for converting upstream coordinates into this
+convention.
+
+Consumers must not depend on an upstream coordinate convention directly.
+
+
+## Frame metadata
+
+Preserve available upstream frame metadata.
+
+YOLO canonical detection records should retain:
+
+source_frame
+source_seq
+video_frame
+
+Do not discard synchronization metadata that may be useful for latency,
+staleness, or future frame association.
+
+
+## Relative depth
+
+TDDepthAnything currently performs per-frame min/max normalization.
+
+Therefore its normalized depth values are useful primarily for relative depth
+relationships within a frame.
+
+Do not assume that the same normalized depth value has a stable physical
+meaning across different frames.
+
+Do not derive metric distance or depth velocity from these values.
+
+Do not implement `velocity_depth` until a temporally stable depth
+representation is available.
+
+
+## Phase 1 scope
+
+Phase 1 yoloData supports standard YOLO object detections only.
+
+Pose/keypoint adaptation is deferred to a dedicated poseData component.
+
+Do not add pose support to yoloData during Phase 1.
