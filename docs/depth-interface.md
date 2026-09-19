@@ -7,6 +7,30 @@ This is an interface record, not a validation of model output.  The source
 uses a named internal TOP and Script TOP, while the `.tox` connector layout
 must be checked in TouchDesigner.
 
+## VERIFIED FROM TOUCHDESIGNER RUNTIME
+
+- TDDepthAnything was fed from yolo-touchdesigner `output4` / **Synced Frame**.
+- Its depth output was spatially aligned with that synced frame. No horizontal
+  or vertical flip was observed.
+- Nearer objects produced higher, warmer/red depth values. Farther areas
+  produced lower, cooler/blue values.
+- `script1.numpyArray()` returned `float32` depth arrays with observed shape
+  `(720, 1280, 4)` and range `0.0..1.0`. Relative depth is channel 0 / R;
+  sampled pixels had the form `[depth, 0, 0, 0]`.
+- The observed 1280 x 720 resolution is a runtime observation only, not a
+  required or hard-coded resolution.
+- yoloData detections and the TDDepthAnything depth map were spatially aligned
+  in runtime testing.
+- depthSampler successfully consumed the normalized `float32` representation
+  and its `depth_value` updated continuously. Runtime samples were roughly
+  0.1 for a farther object and 0.9 for a nearer object, confirming canonical
+  `0 = farther` and `1 = nearer`.
+- The output remains relative depth, not metric distance. TDDepthAnything
+  performs per-frame min/max normalization, so a value is not a stable
+  physical distance across frames.
+- TDPyEnvManager setup and the Depth Anything V2 Small model-loading/inference
+  lifecycle were successfully tested.
+
 ## Input and output
 
 ### VERIFIED FROM SOURCE
@@ -36,14 +60,6 @@ input dimensions.
 
 ### REQUIRES TOUCHDESIGNER RUNTIME VERIFICATION
 
-- The external input/output connector indices and whether `inputImage` and
-  `script1` are the promoted component connectors.
-- The Script TOP's configured pixel format and channel interpretation at the
-  public output.  The copied NumPy buffer is `uint16`, but the final TOP
-  format must be inspected live.
-- TouchDesigner's observed row orientation for `numpyArray()` and the output
-  TOP.  Do not assume that the canonical YOLO bottom-left Y maps directly to a
-  NumPy row without testing.
 - Whether zero-range frames (`max == min`) need guarding in real use.
 
 ## Depth meaning and sampling implications
@@ -57,20 +73,11 @@ is near/far.  A helper must call it `depth_raw` (the R/16-bit sample) and/or
 `depth_normalized` (0..1), never meters.
 
 The output resolution is the input TOP resolution for each completed frame,
-not the model's internal inference resolution.  Corresponding YOLO coordinates
+not the model's internal inference resolution. Corresponding YOLO coordinates
 can be sampled after converting their normalized coordinates to the depth
-TOP's current width/height.  Because YOLO JSON uses bottom-left normalized Y
-and the array row convention is unverified, depth sampling needs an explicit
-Y-orientation setting or a one-time calibration check.
-
-### REQUIRES TOUCHDESIGNER RUNTIME VERIFICATION
-
-- Whether larger numerical depth means nearer or farther for this model and
-  installed version.  Name any derived inverse value `proximity` only after
-  this is confirmed.
-- The displayed/output orientation versus the supplied TOP.
-- Visual alignment of a same-camera YOLO source and Depth Anything source,
-  including any upstream resize/crop/flip outside this extension.
+TOP's current width/height. Runtime testing confirms that canonical
+bottom-left YOLO coordinates align without an additional horizontal or
+vertical flip when sampling the synced depth output.
 
 ## Parameters and lifecycle
 
@@ -111,8 +118,6 @@ may take several minutes.
 1. Configure TDPyEnvManager, restart TouchDesigner after dependency setup, and
    create/load the model with **Load Model**.
 2. Feed a known-orientation color TOP to the component and trigger inference.
-3. Confirm the public depth TOP, its resolution, pixel format, and which color
-   channel contains depth.
-4. Compare a few source pixels to corresponding depth pixels; record whether
-   output Y is visually aligned and whether high values denote near or far.
-5. Feed a constant/near-constant image and observe the component's behavior.
+3. Confirm that a different source resolution still aligns and that no
+   resolution is assumed by downstream helpers.
+4. Feed a constant/near-constant image and observe the component's behavior.

@@ -31,3 +31,12 @@ tmp/
 
 # Local testing
 sandbox/
+
+# TouchDesigner / local Python environment
+examples/.venv/
+examples/checkpoints/
+examples/Backup/
+
+# TouchDesigner backup/temp files
+*.toe.autosave
+*.toe.tmp
