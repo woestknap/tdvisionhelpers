@@ -33,6 +33,20 @@ named component-facing data sources:
 
 No user-facing CHOP output is established by the inspected source.
 
+### VERIFIED FROM TOUCHDESIGNER RUNTIME: public depth TOP
+
+Phase 1 depth sampling uses the public YOLO Depth TOP through an explicit
+user-configured reference. In the current development project it is
+`/project1/yolo/depth`, but that path is an observation and must not be
+hard-coded. `numpyArray()` returned `float32` data in observed shape
+`(720, 1280, 4)`; the resolution is not fixed. Depth is sampled from R/channel
+0. RGB appeared to contain the depth representation, alpha was 1, and observed
+values exceeded 1.0 (approximately 0.555 to 1.328 in one frame).
+
+Movement testing observed lower raw values near and higher raw values far
+(roughly 0.68 near to 2.37 far). These values are relative/raw, non-metric,
+and must be preserved without normalization or clamping as `depth_raw`.
+
 The source does not prove which of these internal operators are exported as
 the `.tox` component's output connectors.  A helper must therefore take an
 explicit DAT/TOP reference rather than assume connector indices.

@@ -13,21 +13,22 @@ layer.
   serialized YOLO JSON source convention.
 - A canonical record always has: `id`, `class_id`, `class_name`, `confidence`,
   `center_x`, `center_y`, `width`, `height`, `x1`, `y1`, `x2`, `y2`.
-- Optional enrichments are: `depth_raw`, `depth_normalized`, `velocity_x`,
-  `velocity_y`, `velocity_depth`, `age`, `visible`.
+- Optional enrichments are: `depth_raw`, `velocity_x`, `velocity_y`,
+  `velocity_depth`, `age`, `visible`.
 - The canonical initial DAT should use an empty string for unavailable numeric
   enrichment values and `visible` = `0`; it must not substitute a fabricated
   zero depth.  `class_name` is the empty string when no explicit class map is
   configured.
-- Depth is relative.  `depth_raw` means the sampled source R value;
-  `depth_normalized` is that value mapped to 0..1.  Neither means meters.
+- Phase 1 depth is relative. `depth_raw` is the sampled public YOLO Depth TOP
+  R value; it is not normalized or metric. Lower observed values are nearer;
+  higher observed values are farther.
 
 ## Components
 
 | Component | Single responsibility | Inputs | Outputs |
 | --- | --- | --- | --- |
 | `yoloData` | Adapt upstream YOLO JSON to canonical detections | Explicit reference/path to the YOLO `predictions` DAT | Canonical detection DAT |
-| `depthSampler` | Sample a depth TOP for each canonical detection | Canonical detection DAT; explicit reference/path to Depth Anything output TOP | Per-ID depth DAT, plus optional diagnostic TOP only if needed later |
+| `depthSampler` | Sample raw YOLO depth for each canonical detection | Canonical detection DAT; explicit reference/path to the public YOLO Depth TOP | Per-ID raw-depth DAT |
 | `visionFusion` | Attach same-frame depth fields to canonical detections | Canonical detection DAT; per-ID depth DAT | Enriched canonical detection DAT |
 
 The explicit upstream references isolate undocumented component connector
@@ -51,27 +52,26 @@ Pose Detections`, and an optional explicit `Class Map DAT`.
 
 ### `depthSampler`
 
-`depthSampler` receives canonical boxes and a depth TOP.  Its initial default
+`depthSampler` receives canonical boxes and the public YOLO Depth TOP. Its initial default
 sample is the median of a reduced inner bounding-box ROI, rather than the
 center pixel.  It converts canonical normalized corners to the depth TOP's
 current pixel dimensions each cook and clips the ROI to valid pixels.
 
-It must have a clearly named `Depth Y Orientation` parameter (`Bottom-left` or
-`Top-left`) until the TDDepthAnything output orientation is verified.  The
-sampler emits rows keyed by `id` containing `depth_raw`,
-`depth_normalized`, `visible`, and a predictable unavailable state.  It does
-not invent metric units or decide whether high depth is near/far.
+The sampler converts canonical bottom-left Y to NumPy's top-row-first index.
+It emits rows keyed by `id` containing `depth_raw` and a predictable
+unavailable state. It does not normalize, clamp, invert, or create metric
+units: lower observed raw values are nearer and higher values are farther.
 
-Useful minimal parameters: `Depth TOP`, `ROI Scale` (sensible inner-region
-default), `Depth Y Orientation`, and `No Data Value` only if a documented
-upstream sentinel becomes necessary.
+Useful minimal parameters: `Depth TOP` and `ROI Scale` (sensible inner-region
+default). The Depth TOP reference is user-configured; no absolute operator
+path is assumed.
 
 ### `visionFusion`
 
 `visionFusion` joins only current-frame `depthSampler` rows to current-frame
 `yoloData` records by `id`.  It copies all canonical detection fields and
-appends `depth_raw`, `depth_normalized`, and `visible`; a missing or stale
-depth row uses the agreed predictable unavailable representation.  It neither
+appends `depth_raw` and `visible`; a missing or stale depth row uses the agreed
+predictable unavailable representation. It neither
 creates nor changes identity IDs, and it adds no temporal behavior.
 
 Useful minimal parameters: `Detection DAT`, `Depth DAT`, and a `Require Same
@@ -84,17 +84,16 @@ check remains deferred until runtime observation documents reliable metadata.
 ```text
 yolo.tox predictions DAT ──> yoloData ──> canonical detection DAT ──┐
                                                                       ├─> visionFusion ─> enriched canonical DAT
-TDDepthAnything depth TOP ──> depthSampler ─> per-ID depth DAT ──────┘
+public YOLO Depth TOP ──────> depthSampler ─> per-ID raw-depth DAT ──┘
 ```
 
 ## Runtime prerequisites before implementation
 
-1. Confirm the public connector/operator paths for YOLO `predictions` and
-   TDDepthAnything's `script1` output.
-2. Confirm both TOPs receive the same camera view with matching orientation,
-   crop, and aspect treatment.
-3. Establish the Depth Anything output row orientation and numerical
-   near/far direction with a known scene.
-4. Capture representative YOLO JSON for detection-only, pose-only, and
-   combined modes to confirm the exact live DAT text and any component-version
-   drift.
+1. Configure explicit references to the YOLO `predictions` DAT and public
+   YOLO Depth TOP; do not depend on absolute paths.
+2. Confirm detections and the depth TOP receive the same camera view with
+   matching orientation, crop, and aspect treatment.
+3. Confirm the raw-depth near/far direction remains lower-near and
+   higher-far for the deployed YOLO configuration.
+4. Capture representative YOLO JSON for detection-only and combined modes to
+   confirm the exact live DAT text and any component-version drift.

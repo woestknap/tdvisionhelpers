@@ -732,20 +732,18 @@ Do not discard synchronization metadata that may be useful for latency,
 staleness, or future frame association.
 
 
-## Relative depth
+## Phase 1 depth
 
-TDDepthAnything currently performs per-frame min/max normalization.
+Phase 1 depth sampling consumes the public YOLO Depth TOP through an explicit
+component parameter. Preserve its sampled value as `depth_raw`.
 
-Therefore its normalized depth values are useful primarily for relative depth
-relationships within a frame.
+`depth_raw` is a relative, non-metric value. Lower observed values are nearer
+and higher observed values are farther. Do not normalize, clamp, invert, or
+convert it to physical units. Do not create a synthetic proximity value.
 
-Do not assume that the same normalized depth value has a stable physical
-meaning across different frames.
-
-Do not derive metric distance or depth velocity from these values.
-
-Do not implement `velocity_depth` until a temporally stable depth
-representation is available.
+Do not derive metric distance or depth velocity from these values. Do not
+implement `velocity_depth` until a temporally stable depth representation is
+available.
 
 
 ## Phase 1 scope

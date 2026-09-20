@@ -1,11 +1,11 @@
-# TDDepthAnything interface reconnaissance
+# TDDepthAnything interface reference (not used by Phase 1 depth sampling)
 
 Upstream inspected: `external/TDDepthAnything` at commit
 `3e8abb45afda23dde0e90c56dc44caad2820b39b`.
 
-This is an interface record, not a validation of model output.  The source
-uses a named internal TOP and Script TOP, while the `.tox` connector layout
-must be checked in TouchDesigner.
+This is an archived interface record for the retained read-only upstream
+submodule. Phase 1 depth sampling uses the public YOLO Depth TOP instead, so
+none of the TDDepthAnything data semantics below are a Phase 1 dependency.
 
 ## VERIFIED FROM TOUCHDESIGNER RUNTIME
 
@@ -21,10 +21,6 @@ must be checked in TouchDesigner.
   required or hard-coded resolution.
 - yoloData detections and the TDDepthAnything depth map were spatially aligned
   in runtime testing.
-- depthSampler successfully consumed the normalized `float32` representation
-  and its `depth_value` updated continuously. Runtime samples were roughly
-  0.1 for a farther object and 0.9 for a nearer object, confirming canonical
-  `0 = farther` and `1 = nearer`.
 - The output remains relative depth, not metric distance. TDDepthAnything
   performs per-frame min/max normalization, so a value is not a stable
   physical distance across frames.

@@ -2,7 +2,7 @@
 
 Attach this extension to a Base COMP containing a Table DAT named ``output``.
 ``Detections`` points to yoloData/output and ``Depthtop`` points to the
-spatially aligned TDDepthAnything depth TOP.
+spatially aligned public YOLO Depth TOP.
 """
 
 import math
@@ -16,7 +16,7 @@ class DepthSamplerExt:
     HEADER = (
         'source_type',
         'id',
-        'depth_value',
+        'depth_raw',
         'source_frame',
         'source_seq',
         'video_frame',
@@ -57,13 +57,13 @@ class DepthSamplerExt:
 
         rows = []
         for detection in detection_rows:
-            depth_value = self._sample_inner_roi(depth_channel, detection)
-            if depth_value is None:
+            depth_raw = self._sample_inner_roi(depth_channel, detection)
+            if depth_raw is None:
                 continue
             rows.append((
                 detection['source_type'],
                 detection['id'],
-                depth_value,
+                depth_raw,
                 detection['source_frame'],
                 detection['source_seq'],
                 detection['video_frame'],
@@ -163,10 +163,10 @@ class DepthSamplerExt:
         if valid.size == 0:
             return None
 
-        depth_value = float(np.median(valid))
-        if not math.isfinite(depth_value):
+        depth_raw = float(np.median(valid))
+        if not math.isfinite(depth_raw):
             return None
-        return self._normalize_depth_value(depth_value, depth_channel.dtype)
+        return depth_raw
 
     def _inner_box(self, detection):
         x1, y1, x2, y2 = (
@@ -185,12 +185,6 @@ class DepthSamplerExt:
             center_x + half_width,
             center_y + half_height,
         )
-
-    @staticmethod
-    def _normalize_depth_value(value, dtype):
-        if np.issubdtype(dtype, np.integer):
-            value /= float(np.iinfo(dtype).max)
-        return max(0.0, min(1.0, value))
 
     def _write_rows(self, rows):
         self.output.clear()
