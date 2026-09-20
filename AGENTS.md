@@ -12,11 +12,9 @@ Never modify, format, refactor, commit changes to, or generate files inside:
 
 \- external/yolo-touchdesigner/
 
-\- external/TDDepthAnything/
 
 
-
-These are Git submodules tracking upstream projects.
+This is a Git submodule tracking an upstream project.
 
 
 
@@ -42,19 +40,13 @@ computer-vision data from existing TouchDesigner components.
 
 
 
-Initial supported upstream components:
+Initial supported upstream component:
 
 
 
 1\. torinmb/yolo-touchdesigner
 
 &#x20;  https://github.com/torinmb/yolo-touchdesigner
-
-
-
-2\. TouchDesigner/TDDepthAnything
-
-&#x20;  https://github.com/TouchDesigner/TDDepthAnything
 
 
 
@@ -115,8 +107,6 @@ Do not:
 
 
 \- rewrite YOLO inference
-
-\- rewrite Depth Anything inference
 
 \- move ML inference into TDVisionHelpers
 

@@ -10,13 +10,11 @@ TDVisionHelpers provides a modular interaction and data-processing layer around 
 
 
 
-Initial upstream integrations:
+Initial upstream integration:
 
 
 
 \- torinmb/yolo-touchdesigner
-
-\- TouchDesigner/TDDepthAnything
 
 
 

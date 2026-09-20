@@ -1,6 +1,3 @@
-[submodule "external/TDDepthAnything"]
-	path = external/TDDepthAnything
-	url = https://github.com/TouchDesigner/TDDepthAnything.git
 [submodule "external/yolo-touchdesigner"]
 	path = external/yolo-touchdesigner
 	url = https://github.com/torinmb/yolo-touchdesigner.git
