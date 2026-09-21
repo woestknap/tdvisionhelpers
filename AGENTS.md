@@ -218,7 +218,7 @@ Missing data must have a predictable representation.
 
 
 
-Depth Anything output must be treated as relative depth unless the
+Relative depth output must be treated as non-metric unless the
 
 specific upstream model/configuration explicitly provides metric depth.
 
