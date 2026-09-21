@@ -29,7 +29,7 @@ layer.
 | --- | --- | --- | --- |
 | `yoloData` | Adapt upstream YOLO JSON to canonical detections | Explicit reference/path to the YOLO `predictions` DAT | Canonical detection DAT |
 | `depthSampler` | Sample raw YOLO depth for each canonical detection | Canonical detection DAT; explicit reference/path to the public YOLO Depth TOP | Per-ID raw-depth DAT |
-| `visionFusion` | Attach same-frame depth fields to canonical detections | Canonical detection DAT; per-ID depth DAT | Enriched canonical detection DAT |
+| `visionFusion` | Attach frame-compatible raw depth to canonical detections | Canonical detection DAT; per-ID raw-depth DAT | Enriched canonical detection DAT |
 
 The explicit upstream references isolate undocumented component connector
 layouts in the adapters.  Downstream helpers consume only canonical DATs.
@@ -68,16 +68,16 @@ path is assumed.
 
 ### `visionFusion`
 
-`visionFusion` joins only current-frame `depthSampler` rows to current-frame
-`yoloData` records by `id`.  It copies all canonical detection fields and
-appends `depth_raw` and `visible`; a missing or stale depth row uses the agreed
-predictable unavailable representation. It neither
-creates nor changes identity IDs, and it adds no temporal behavior.
+`visionFusion` joins current `depthSampler` rows to current `yoloData` object
+records by `(source_type, id)`. It attaches `depth_raw` only when
+`source_frame`, `source_seq`, and `video_frame` are all non-empty and exactly
+equal. A missing, stale, malformed, or duplicate depth row leaves
+`depth_raw` empty while preserving the detection. It neither creates nor
+changes identity IDs, interprets metadata, normalizes depth, nor adds temporal
+behavior.
 
-Useful minimal parameters: `Detection DAT`, `Depth DAT`, and a `Require Same
-Frame` toggle.  If frame metadata is exposed consistently by both adapters,
-the default should require matching source frame/sequence; otherwise this
-check remains deferred until runtime observation documents reliable metadata.
+Useful minimal parameters: `Detections` and `Depth` DAT references. Exact
+frame-metadata matching is required by the Phase 1 implementation.
 
 ## Intended flow
 
