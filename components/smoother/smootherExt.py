@@ -5,7 +5,7 @@ import time
 
 
 class SmootherExt:
-    """Time-based smoothing for one selected canonical object's geometry."""
+    """Time-based smoothing for current canonical object rows."""
 
     HEADER = (
         'source_type', 'id', 'class_id', 'class_name', 'confidence',
@@ -19,29 +19,37 @@ class SmootherExt:
     def __init__(self, ownerComp):
         self.ownerComp = ownerComp
         self.output = ownerComp.op('output')
-        self._identity = None
-        self._smoothed_geometry = None
-        self._last_sample_signature = None
-        self._last_sample_time = None
+        self._states = {}
         self._has_written_output = False
-        self._output_has_row = False
+        self._output_has_rows = False
 
     def Update(self, force=False):
-        """Process the current selected row, or reset on unavailable input."""
+        """Process current valid object rows, or reset on unavailable input."""
         if self.output is None:
             return
 
-        row = self._read_current_row(self._configured_op('Inputdat'))
-        if row is None:
+        rows = self._read_current_rows(self._configured_op('Inputdat'))
+        if rows is None:
             self._reset()
-            if force or self._output_has_row or not self._has_written_output:
+            if force or self._output_has_rows or not self._has_written_output:
                 self._write_header()
             return
 
-        output_row, is_new_sample = self._process_valid_row(
-            row, self._runtime_seconds())
-        if force or is_new_sample or not self._has_written_output:
-            self._write_row(output_row)
+        now = self._runtime_seconds()
+        current_identities = set()
+        output_rows = []
+        changed = False
+        for row in rows:
+            identity = (row['source_type'], row['id'])
+            current_identities.add(identity)
+            output_row, is_new_sample = self._process_valid_row(row, now)
+            output_rows.append(output_row)
+            changed = changed or is_new_sample
+
+        if self._remove_absent_states(current_identities):
+            changed = True
+        if force or changed or not self._has_written_output:
+            self._write_rows(output_rows)
 
     def _configured_op(self, parameter_name):
         parameter = getattr(self.ownerComp.par, parameter_name, None)
@@ -62,8 +70,8 @@ class SmootherExt:
             return 0.15
         return value if math.isfinite(value) else 0.15
 
-    def _read_current_row(self, input_dat):
-        """Return one complete valid input row, otherwise None."""
+    def _read_current_rows(self, input_dat):
+        """Return all valid rows; None denotes missing or malformed schema."""
         if input_dat is None:
             return None
         try:
@@ -71,43 +79,60 @@ class SmootherExt:
             column_indices = {
                 column: headers.index(column) for column in self.HEADER
             }
-            if input_dat.numRows < 2:
-                return None
-            row = {
-                column: input_dat[1, index].val
-                for column, index in column_indices.items()
-            }
+            num_rows = input_dat.numRows
         except Exception:
             return None
 
-        if row['source_type'] in (None, '') or row['id'] in (None, ''):
-            return None
-        geometry = tuple(self._finite_number(row[column]) for column in self.GEOMETRY_COLUMNS)
-        if any(value is None for value in geometry):
-            return None
-        row['_geometry'] = geometry
-        return row
+        rows = []
+        for row_index in range(1, num_rows):
+            try:
+                row = {
+                    column: input_dat[row_index, index].val
+                    for column, index in column_indices.items()
+                }
+            except Exception:
+                continue
+            if row['source_type'] in (None, '') or row['id'] in (None, ''):
+                continue
+            geometry = tuple(
+                self._finite_number(row[column]) for column in self.GEOMETRY_COLUMNS)
+            if any(value is None for value in geometry):
+                continue
+            row['_geometry'] = geometry
+            rows.append(row)
+        return rows
 
     def _process_valid_row(self, row, now):
-        """Return (output_row, is_new_sample); state math accepts explicit now."""
+        """Return (output_row, is_new_sample) for this canonical identity."""
         identity = (row['source_type'], row['id'])
         signature = tuple(row[column] for column in self.HEADER)
-        if signature == self._last_sample_signature:
-            return self._output_row(row, self._smoothed_geometry), False
+        state = self._states.get(identity)
+        if state is not None and signature == state['signature']:
+            return self._output_row(row, state['geometry']), False
 
         current = row['_geometry']
-        if identity != self._identity or self._smoothed_geometry is None:
+        if state is None:
             smoothed = current
         else:
-            dt = self._elapsed_seconds(now, self._last_sample_time)
+            dt = self._elapsed_seconds(now, state['time'])
             smoothed = self._apply_smoothing(
-                self._smoothed_geometry, current, self._smooth_time(), dt)
+                state['geometry'], current, self._smooth_time(), dt)
 
-        self._identity = identity
-        self._smoothed_geometry = smoothed
-        self._last_sample_signature = signature
-        self._last_sample_time = now
+        self._states[identity] = {
+            'geometry': smoothed,
+            'signature': signature,
+            'time': now,
+        }
         return self._output_row(row, smoothed), True
+
+    def _remove_absent_states(self, current_identities):
+        """Discard state as soon as an identity is absent from valid input rows."""
+        removed = False
+        for identity in tuple(self._states):
+            if identity not in current_identities:
+                del self._states[identity]
+                removed = True
+        return removed
 
     @staticmethod
     def _elapsed_seconds(now, previous):
@@ -158,20 +183,18 @@ class SmootherExt:
             return time.monotonic()
 
     def _reset(self):
-        self._identity = None
-        self._smoothed_geometry = None
-        self._last_sample_signature = None
-        self._last_sample_time = None
+        self._states.clear()
 
     def _write_header(self):
         self.output.clear()
         self.output.appendRow(self.HEADER)
         self._has_written_output = True
-        self._output_has_row = False
+        self._output_has_rows = False
 
-    def _write_row(self, row):
+    def _write_rows(self, rows):
         self.output.clear()
         self.output.appendRow(self.HEADER)
-        self.output.appendRow(row)
+        for row in rows:
+            self.output.appendRow(row)
         self._has_written_output = True
-        self._output_has_row = True
+        self._output_has_rows = bool(rows)

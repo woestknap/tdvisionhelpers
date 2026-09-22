@@ -1,9 +1,10 @@
 # smoother (Phase 2B)
 
-`smoother` applies time-based exponential smoothing to the selected object's
-current 2D geometry. It consumes `objectSelector/output` and emits the same
-canonical table schema. It does not track objects, smooth depth, calculate
-velocity, or modify source metadata.
+`smoother` applies time-based exponential smoothing to current canonical object
+geometry. It accepts zero, one, or many rows and emits the same canonical table
+schema in the same row order. It remains fully compatible with the original
+single-row `objectSelector/output` workflow. It does not track objects, smooth
+depth, calculate velocity, or modify source metadata.
 
 ## Custom parameters
 
@@ -16,8 +17,9 @@ Create a custom page named **Smoother** with these parameters:
 
 ## Input and output contract
 
-Input is the at-most-one-row `objectSelector/output` schema. Output uses this
-exact same header and contains at most one row:
+Input uses the canonical `objectSelector/output` / `visionFusion/output` schema.
+It may contain zero, one, or many valid rows. Output uses this exact same header
+and preserves valid input-row order:
 
 ```text
 source_type
@@ -62,21 +64,30 @@ non-positive `dt` also uses current geometry immediately, preventing a clock
 discontinuity from freezing output. A large valid `dt` remains stable and
 naturally approaches current geometry.
 
-State resets immediately when input is missing, header-only, malformed, has
-unusable geometry, or changes canonical identity. The next valid row then
-initializes directly from current geometry; interpolation never crosses between
-objects or over a target-loss gap.
+Smoothing state is independent for every canonical identity `(source_type, id)`.
+Each identity stores its own geometry, last full-row signature, and sample time;
+there is never interpolation between identities. A newly appearing identity
+initializes directly from its current geometry. If an identity is absent from a
+current valid input update, its state is discarded. Its later reappearance is a
+fresh acquisition and initializes immediately.
+
+Missing, header-only, or schema-malformed input clears all smoothing state and
+outputs only the header. A malformed geometry row is skipped without
+contaminating other identities; its prior state is discarded because it is not a
+current valid row. This preserves a valid canonical output table.
 
 The component processes every new input sample. It recognizes an exact repeat
-of the complete current input row (including opaque source metadata) and does
-not advance smoothing twice for that repeat cook. Parameter edits alone do not
-advance state; the new Smooth Time applies to the next new sample.
+of each identity's complete current row (including opaque source metadata) and
+does not advance that identity twice for a repeat cook; repeats do not affect
+other identities. Parameter edits alone do not advance state; the new Smooth
+Time applies to the next new sample for each identity.
 
 ## TouchDesigner construction
 
 1. Create a Base COMP named `smoother`, then add a Table DAT named `output`.
-2. Add the **Smoother** custom page and parameters listed above. Set `Inputdat`
-   to `objectSelector/output`.
+2. Add the **Smoother** custom page and parameters listed above. For the
+   original selected-object workflow, set `Inputdat` to `objectSelector/output`.
+   A multi-object canonical DAT with the same schema is also supported.
 3. Add an extension Text DAT named `smootherExt`, set its extension class to
    `SmootherExt`, and promote it. During development, its File parameter may
    point to:
