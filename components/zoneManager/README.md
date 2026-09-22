@@ -1,9 +1,21 @@
 # zoneManager (Phase 3A)
 
-`zoneManager` tests the current selected/smoothed object's center point against
+`zoneManager` tests zero, one, or many current canonical object centers against
 user-defined rectangular zones and produces compact occupancy plus enter/exit
 events. It consumes `smoother/output` directly; velocity is intentionally not
 an input because zone membership depends only on center position.
+
+Typical multi-object people-only placement is:
+
+```text
+visionFusion
+    ↓
+classFilter
+    ↓
+smoother
+    ↓
+zoneManager
+```
 
 ## Custom parameters
 
@@ -37,7 +49,10 @@ ignored. Valid zones retain their first-valid-occurrence table order.
 
 ## Output contract
 
-`output` contains one row for each current valid unique zone:
+`output` contains one row for every current valid identity × valid zone
+combination, plus any one-update disappearance exit rows. Normal row ordering
+is object-major then zone-minor: input object-row order first, then valid zone
+definition order for each object.
 
 ```text
 zone
@@ -52,38 +67,46 @@ id
 outside-to-inside transition; `exited` pulses for an inside-to-outside
 transition. Output deliberately does not repeat the full input object row.
 
-The canonical identity is `(source_type, id)`, not `id` alone. On a first valid
-acquisition, zones containing the center emit `entered=1`, making an object
-already inside observable.
+The canonical identity is `(source_type, id)`, not `id` alone. Occupancy state
+is independent for every `(source_type, id, zone_name)` combination. On a first
+valid acquisition, zones containing that object's center emit `entered=1`,
+making an object already inside observable. Multiple identities may be inside
+the same zone independently.
 
-## Identity, target loss, and configuration failure
+## Disappearance, reacquisition, and configuration failure
 
-On an identity change, the first new-object sample emits exits for zones the
-previous object occupied, with that previous identity on exit rows. The new
-identity becomes pending and does not emit its enters in that same update. Its
-next genuinely processed sample evaluates membership and emits its enters.
+When an identity disappears from an otherwise valid current input, each
+still-valid zone it occupied emits one appended exit row using that disappeared
+identity. Existing current identities are output first. For several disappeared
+identities, exit order follows their previous processed input order where
+available, then zone-definition order. The state is removed immediately, so the
+next processed sample no longer contains those exit rows. A reappearing identity
+is a fresh acquisition and may enter again.
 
-On header-only target loss, occupied zones emit one exit pulse using the prior
-identity. Later header-only cooks settle to all-zero rows with blank identity.
-When an object reappears, it is a fresh acquisition.
-
-Missing `Inputdat`, malformed object schema, or invalid/non-finite center is a
-configuration/input failure rather than target loss. It resets state and
-outputs zero rows with blank identity, without synthetic exits. Missing or
-malformed `Zonesdat` resets all state and outputs only the header.
+Header-only input is target loss: occupied identities emit their one exit rows,
+then later header-only cooks settle to all-zero zone rows with blank identity,
+preserving the original single-object behavior. Missing `Inputdat` or malformed
+object schema is a configuration/input failure: it clears all object state and
+outputs all-zero zone rows without synthetic exits. Invalid individual rows are
+skipped; an identity represented only by invalid data is treated as absent and
+may produce normal disappearance exits. Missing or malformed `Zonesdat` resets
+all state and outputs only the header.
 
 ## Runtime zone edits and event pulses
 
-Zone definitions are parsed every logical update. History is preserved by zone
-name while that name remains valid. Changing coordinates can therefore create
-normal enter/exit events; a new zone starts outside and can enter immediately.
-Removed zones disappear without synthetic exit rows. A malformed row that later
-becomes valid is treated as newly added.
+Zone definitions are parsed every logical update. History is retained by valid
+zone name for every identity while that name continues to exist. Coordinate
+changes therefore produce normal per-identity enter/exit transitions; a newly
+added zone starts outside for every identity and can enter immediately. Removed
+zones disappear without synthetic exits. A malformed row that later becomes
+valid is treated as newly added.
 
-The component deduplicates the logical pair of full object-row content and
-parsed zone definitions. Repeated identical cooks never replay a transition.
-After a transition is written, the next identical cook clears `entered` and
-`exited` to zero while retaining occupancy, so event flags do not stick high.
+The component deduplicates the complete ordered set of valid object rows plus
+parsed zone definitions. A change for one object still processes all current
+objects, while each object's own occupancy remains independent. Repeated
+identical cooks never replay transitions. After a transition is written, the
+next identical cook clears `entered` and `exited` to zero while retaining
+occupancy, so event flags do not stick high.
 
 ## TouchDesigner construction
 
@@ -91,7 +114,9 @@ After a transition is written, the next identical cook clears `entered` and
 2. Optionally create a local Table DAT such as `zones` for development, using
    the `name, x1, y1, x2, y2` header above.
 3. Add the **Zone Manager** custom page and its `Inputdat` and `Zonesdat` OP
-   parameters. Point them to `smoother/output` and the zones Table DAT.
+   parameters. Point them to `smoother/output` and the zones Table DAT. Both
+   the original one-row `objectSelector → smoother → zoneManager` workflow and
+   multi-row canonical input are supported.
 4. Add an extension Text DAT named `zoneManagerExt`, set its extension class to
    `ZoneManagerExt`, and promote it. During development, set its File parameter
    to:

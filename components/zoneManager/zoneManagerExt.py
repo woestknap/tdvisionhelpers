@@ -1,10 +1,10 @@
-"""TouchDesigner extension for the Phase 3A zoneManager component."""
+"""TouchDesigner extension for the Phase 4C multi-object zoneManager."""
 
 import math
 
 
 class ZoneManagerExt:
-    """Generate rectangular-zone occupancy and enter/exit events."""
+    """Generate independent rectangular-zone events for current objects."""
 
     INPUT_HEADER = (
         'source_type', 'id', 'class_id', 'class_name', 'confidence',
@@ -17,15 +17,14 @@ class ZoneManagerExt:
     def __init__(self, ownerComp):
         self.ownerComp = ownerComp
         self.output = ownerComp.op('output')
-        self._identity = None
-        self._pending_identity = False
-        self._occupancy = {}
+        self._states = {}
+        self._previous_order = ()
         self._last_signature = None
         self._clear_events = False
         self._has_written_output = False
 
     def Update(self, force=False):
-        """Advance zone state once per changed object or zone-table state."""
+        """Advance all identity/zone states once per changed logical snapshot."""
         if self.output is None:
             return
 
@@ -36,21 +35,13 @@ class ZoneManagerExt:
             return
 
         zone_signature = tuple(zones)
-        object_kind, row = self._read_object(self._configured_op('Inputdat'))
+        object_kind, rows = self._read_objects(self._configured_op('Inputdat'))
         if object_kind == 'invalid':
-            signature = ('invalid', zone_signature)
-            if force or signature != self._last_signature or not self._has_written_output:
-                self._clear_object_state()
-                self._last_signature = signature
-                self._clear_events = False
-                self._write_rows(self._zero_rows(zones))
-            return
-
-        if object_kind == 'loss':
+            self._process_invalid_input(zones, zone_signature, force)
+        elif object_kind == 'loss':
             self._process_loss(zones, zone_signature, force)
-            return
-
-        self._process_object(row, zones, zone_signature, force)
+        else:
+            self._process_objects(rows, zones, zone_signature, force)
 
     def _configured_op(self, parameter_name):
         parameter = getattr(self.ownerComp.par, parameter_name, None)
@@ -61,32 +52,37 @@ class ZoneManagerExt:
         except Exception:
             return None
 
-    def _read_object(self, input_dat):
-        """Return ('object', row), ('loss', None), or ('invalid', None)."""
+    def _read_objects(self, input_dat):
+        """Return ('objects', rows), ('loss', ()), or ('invalid', ())."""
         if input_dat is None:
-            return 'invalid', None
+            return 'invalid', ()
         try:
             headers = [cell.val for cell in input_dat.row(0)]
-            column_indices = {
-                column: headers.index(column) for column in self.INPUT_HEADER
-            }
-            if input_dat.numRows < 2:
-                return 'loss', None
-            row = {
-                column: input_dat[1, index].val
-                for column, index in column_indices.items()
-            }
+            indices = {column: headers.index(column) for column in self.INPUT_HEADER}
+            num_rows = input_dat.numRows
         except Exception:
-            return 'invalid', None
+            return 'invalid', ()
+        if num_rows < 2:
+            return 'loss', ()
 
-        if row['source_type'] in (None, '') or row['id'] in (None, ''):
-            return 'invalid', None
-        center_x = self._finite_number(row['center_x'])
-        center_y = self._finite_number(row['center_y'])
-        if center_x is None or center_y is None:
-            return 'invalid', None
-        row['_center'] = (center_x, center_y)
-        return 'object', row
+        rows = []
+        for row_index in range(1, num_rows):
+            try:
+                row = {
+                    column: input_dat[row_index, index].val
+                    for column, index in indices.items()
+                }
+            except Exception:
+                continue
+            if row['source_type'] in (None, '') or row['id'] in (None, ''):
+                continue
+            center_x = self._finite_number(row['center_x'])
+            center_y = self._finite_number(row['center_y'])
+            if center_x is None or center_y is None:
+                continue
+            row['_center'] = (center_x, center_y)
+            rows.append(row)
+        return 'objects', rows
 
     def _read_zones(self, zones_dat):
         """Read valid unique rectangles in first-valid-occurrence order."""
@@ -94,9 +90,7 @@ class ZoneManagerExt:
             return None
         try:
             headers = [cell.val for cell in zones_dat.row(0)]
-            column_indices = {
-                column: headers.index(column) for column in self.ZONE_HEADER
-            }
+            indices = {column: headers.index(column) for column in self.ZONE_HEADER}
             num_rows = zones_dat.numRows
         except Exception:
             return None
@@ -105,9 +99,9 @@ class ZoneManagerExt:
         names = set()
         for row_index in range(1, num_rows):
             try:
-                name = zones_dat[row_index, column_indices['name']].val
+                name = zones_dat[row_index, indices['name']].val
                 coordinates = tuple(
-                    self._finite_number(zones_dat[row_index, column_indices[column]].val)
+                    self._finite_number(zones_dat[row_index, indices[column]].val)
                     for column in ('x1', 'y1', 'x2', 'y2'))
             except Exception:
                 continue
@@ -120,104 +114,121 @@ class ZoneManagerExt:
             zones.append((name, x1, y1, x2, y2))
         return tuple(zones)
 
-    def _process_object(self, row, zones, zone_signature, force):
-        identity = (row['source_type'], row['id'])
-        signature = ('object', tuple(row[column] for column in self.INPUT_HEADER), zone_signature)
+    def _process_objects(self, rows, zones, zone_signature, force):
+        row_signatures = tuple(
+            tuple(row[column] for column in self.INPUT_HEADER) for row in rows)
+        signature = ('objects', row_signatures, zone_signature)
         if signature == self._last_signature:
-            self._clear_event_pulse(zones, force)
+            self._clear_event_pulse(rows, zones, force)
             return
 
         self._retain_zone_history(zones)
-        if self._identity is not None and identity != self._identity:
-            rows = self._identity_change_rows(zones)
-            self._identity = identity
-            self._pending_identity = True
-            self._occupancy = {zone[0]: False for zone in zones}
-        else:
-            first_sample = self._identity is None or self._pending_identity
-            self._identity = identity
-            self._pending_identity = False
-            rows = self._occupancy_rows(zones, row['_center'], identity, first_sample)
+        current_identities = set()
+        current_order = []
+        normal_rows = []
+        for row in rows:
+            identity = (row['source_type'], row['id'])
+            current_identities.add(identity)
+            current_order.append(identity)
+            state = self._states.get(identity)
+            if state is None:
+                state = {'occupancy': {}}
+                self._states[identity] = state
+            occupancy = state['occupancy']
+            for name, x1, y1, x2, y2 in zones:
+                inside = x1 <= row['_center'][0] <= x2 and y1 <= row['_center'][1] <= y2
+                previous = occupancy.get(name, False)
+                entered = inside and not previous
+                exited = previous and not inside
+                occupancy[name] = inside
+                normal_rows.append((
+                    name, int(inside), int(entered), int(exited), identity[0], identity[1]))
 
+        disappearance_rows = self._remove_absent_states(current_identities, zones)
+        self._previous_order = tuple(current_order)
         self._last_signature = signature
-        self._clear_events = any(row_values[2] or row_values[3] for row_values in rows)
-        self._write_rows(rows)
+        rows_to_write = normal_rows + disappearance_rows
+        self._clear_events = any(row[2] or row[3] for row in rows_to_write)
+        self._write_rows(rows_to_write)
 
     def _process_loss(self, zones, zone_signature, force):
         signature = ('loss', zone_signature)
         if signature == self._last_signature:
-            self._clear_event_pulse(zones, force)
+            if self._clear_events:
+                self._clear_events = False
+                self._write_rows(self._zero_rows(zones))
+            elif force:
+                self._write_rows(self._zero_rows(zones))
             return
 
         self._retain_zone_history(zones)
-        rows = self._loss_rows(zones)
-        self._clear_object_state()
+        exit_rows = self._remove_absent_states(set(), zones)
+        self._previous_order = ()
         self._last_signature = signature
-        self._clear_events = any(row_values[3] for row_values in rows)
-        self._write_rows(rows)
+        self._clear_events = bool(exit_rows)
+        self._write_rows(exit_rows if exit_rows else self._zero_rows(zones))
 
-    def _clear_event_pulse(self, zones, force):
+    def _process_invalid_input(self, zones, zone_signature, force):
+        signature = ('invalid', zone_signature)
+        if force or signature != self._last_signature or not self._has_written_output:
+            self._clear_object_state()
+            self._last_signature = signature
+            self._clear_events = False
+            self._write_rows(self._zero_rows(zones))
+
+    def _clear_event_pulse(self, rows, zones, force):
         if self._clear_events:
             self._clear_events = False
-            self._write_rows(self._settled_rows(zones))
+            self._write_rows(self._settled_rows(rows, zones))
         elif force:
-            self._write_rows(self._settled_rows(zones))
+            self._write_rows(self._settled_rows(rows, zones))
 
     def _retain_zone_history(self, zones):
-        self._occupancy = {
-            zone[0]: self._occupancy.get(zone[0], False)
-            for zone in zones
-        }
+        valid_names = {zone[0] for zone in zones}
+        for state in self._states.values():
+            occupancy = state['occupancy']
+            for name in tuple(occupancy):
+                if name not in valid_names:
+                    del occupancy[name]
+            for name in valid_names:
+                occupancy.setdefault(name, False)
 
-    def _occupancy_rows(self, zones, center, identity, first_sample):
+    def _remove_absent_states(self, current_identities, zones):
+        """Append one exit per occupied still-valid zone, then discard its state."""
         rows = []
-        for name, x1, y1, x2, y2 in zones:
-            inside = x1 <= center[0] <= x2 and y1 <= center[1] <= y2
-            previous = self._occupancy.get(name, False)
-            entered = inside and (first_sample or not previous)
-            exited = previous and not inside
-            self._occupancy[name] = inside
-            rows.append((name, int(inside), int(entered), int(exited), identity[0], identity[1]))
+        ordered = []
+        seen = set()
+        for identity in self._previous_order:
+            if identity in self._states and identity not in seen:
+                ordered.append(identity)
+                seen.add(identity)
+        for identity in self._states:
+            if identity not in seen:
+                ordered.append(identity)
+                seen.add(identity)
+        for identity in ordered:
+            if identity in current_identities:
+                continue
+            occupancy = self._states[identity]['occupancy']
+            for name, _, _, _, _ in zones:
+                if occupancy.get(name, False):
+                    rows.append((name, 0, 0, 1, identity[0], identity[1]))
+            del self._states[identity]
         return rows
 
-    def _identity_change_rows(self, zones):
-        previous_identity = self._identity
-        rows = []
-        for name, _, _, _, _ in zones:
-            was_inside = self._occupancy.get(name, False)
-            rows.append((
-                name, 0, 0, int(was_inside),
-                previous_identity[0] if was_inside else '',
-                previous_identity[1] if was_inside else '',
-            ))
-        return rows
-
-    def _loss_rows(self, zones):
-        rows = []
-        for name, _, _, _, _ in zones:
-            was_inside = self._occupancy.get(name, False)
-            rows.append((
-                name, 0, 0, int(was_inside),
-                self._identity[0] if was_inside else '',
-                self._identity[1] if was_inside else '',
-            ))
-        return rows
-
-    def _settled_rows(self, zones):
-        identity = self._identity if self._identity is not None and not self._pending_identity else None
-        return [
-            (name, int(self._occupancy.get(name, False)), 0, 0,
-             identity[0] if identity is not None else '',
-             identity[1] if identity is not None else '')
-            for name, _, _, _, _ in zones
-        ]
+    def _settled_rows(self, rows, zones):
+        output_rows = []
+        for row in rows:
+            identity = (row['source_type'], row['id'])
+            occupancy = self._states.get(identity, {}).get('occupancy', {})
+            for name, _, _, _, _ in zones:
+                output_rows.append((
+                    name, int(occupancy.get(name, False)), 0, 0, identity[0], identity[1]))
+        return output_rows
 
     @staticmethod
     def _zero_rows(zones):
-        return [
-            (name, 0, 0, 0, '', '')
-            for name, _, _, _, _ in zones
-        ]
+        return [(name, 0, 0, 0, '', '') for name, _, _, _, _ in zones]
 
     @staticmethod
     def _finite_number(value):
@@ -230,9 +241,8 @@ class ZoneManagerExt:
         return number if math.isfinite(number) else None
 
     def _clear_object_state(self):
-        self._identity = None
-        self._pending_identity = False
-        self._occupancy = {}
+        self._states.clear()
+        self._previous_order = ()
 
     def _reset_all(self):
         self._clear_object_state()
