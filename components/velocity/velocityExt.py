@@ -5,7 +5,7 @@ import time
 
 
 class VelocityExt:
-    """Calculate image-space center velocity for one selected object."""
+    """Calculate image-space center velocity for current canonical objects."""
 
     INPUT_HEADER = (
         'source_type', 'id', 'class_id', 'class_name', 'confidence',
@@ -17,30 +17,37 @@ class VelocityExt:
     def __init__(self, ownerComp):
         self.ownerComp = ownerComp
         self.output = ownerComp.op('output')
-        self._identity = None
-        self._last_center = None
-        self._last_sample_signature = None
-        self._last_sample_time = None
-        self._last_velocity = (0.0, 0.0, 0.0)
+        self._states = {}
         self._has_written_output = False
-        self._output_has_row = False
+        self._output_has_rows = False
 
     def Update(self, force=False):
-        """Process one new current sample, or reset for unavailable input."""
+        """Process current valid rows, or reset for unavailable input."""
         if self.output is None:
             return
 
-        row = self._read_current_row(self._configured_op('Inputdat'))
-        if row is None:
+        rows = self._read_current_rows(self._configured_op('Inputdat'))
+        if rows is None:
             self._reset()
-            if force or self._output_has_row or not self._has_written_output:
+            if force or self._output_has_rows or not self._has_written_output:
                 self._write_header()
             return
 
-        output_row, is_new_sample = self._process_valid_row(
-            row, self._runtime_seconds())
-        if force or is_new_sample or not self._has_written_output:
-            self._write_row(output_row)
+        now = self._runtime_seconds()
+        current_identities = set()
+        output_rows = []
+        changed = False
+        for row in rows:
+            identity = (row['source_type'], row['id'])
+            current_identities.add(identity)
+            output_row, is_new_sample = self._process_valid_row(row, now)
+            output_rows.append(output_row)
+            changed = changed or is_new_sample
+
+        if self._remove_absent_states(current_identities):
+            changed = True
+        if force or changed or not self._has_written_output:
+            self._write_rows(output_rows)
 
     def _configured_op(self, parameter_name):
         parameter = getattr(self.ownerComp.par, parameter_name, None)
@@ -51,8 +58,8 @@ class VelocityExt:
         except Exception:
             return None
 
-    def _read_current_row(self, input_dat):
-        """Return a valid full-schema selected row, otherwise None."""
+    def _read_current_rows(self, input_dat):
+        """Return all valid rows; None denotes missing or malformed schema."""
         if input_dat is None:
             return None
         try:
@@ -60,45 +67,61 @@ class VelocityExt:
             column_indices = {
                 column: headers.index(column) for column in self.INPUT_HEADER
             }
-            if input_dat.numRows < 2:
-                return None
-            row = {
-                column: input_dat[1, index].val
-                for column, index in column_indices.items()
-            }
+            num_rows = input_dat.numRows
         except Exception:
             return None
 
-        if row['source_type'] in (None, '') or row['id'] in (None, ''):
-            return None
-        center_x = self._finite_number(row['center_x'])
-        center_y = self._finite_number(row['center_y'])
-        if center_x is None or center_y is None:
-            return None
-        row['_center'] = (center_x, center_y)
-        return row
+        rows = []
+        for row_index in range(1, num_rows):
+            try:
+                row = {
+                    column: input_dat[row_index, index].val
+                    for column, index in column_indices.items()
+                }
+            except Exception:
+                continue
+            if row['source_type'] in (None, '') or row['id'] in (None, ''):
+                continue
+            center_x = self._finite_number(row['center_x'])
+            center_y = self._finite_number(row['center_y'])
+            if center_x is None or center_y is None:
+                continue
+            row['_center'] = (center_x, center_y)
+            rows.append(row)
+        return rows
 
     def _process_valid_row(self, row, now):
-        """Return (output_row, is_new_sample); core timing accepts explicit now."""
+        """Return (output_row, is_new_sample) for one canonical identity."""
         identity = (row['source_type'], row['id'])
         signature = tuple(row[column] for column in self.INPUT_HEADER)
-        if signature == self._last_sample_signature:
-            return self._output_row(row, self._last_velocity), False
+        state = self._states.get(identity)
+        if state is not None and signature == state['signature']:
+            return self._output_row(row, state['velocity']), False
 
         current_center = row['_center']
-        if identity != self._identity or self._last_center is None:
+        if state is None:
             velocity = (0.0, 0.0, 0.0)
         else:
-            dt = self._elapsed_seconds(now, self._last_sample_time)
+            dt = self._elapsed_seconds(now, state['time'])
             velocity = self._calculate_velocity(
-                self._last_center, current_center, dt)
+                state['center'], current_center, dt)
 
-        self._identity = identity
-        self._last_center = current_center
-        self._last_sample_signature = signature
-        self._last_sample_time = now
-        self._last_velocity = velocity
+        self._states[identity] = {
+            'center': current_center,
+            'signature': signature,
+            'time': now,
+            'velocity': velocity,
+        }
         return self._output_row(row, velocity), True
+
+    def _remove_absent_states(self, current_identities):
+        """Discard baseline state for identities absent from valid current rows."""
+        removed = False
+        for identity in tuple(self._states):
+            if identity not in current_identities:
+                del self._states[identity]
+                removed = True
+        return removed
 
     @staticmethod
     def _elapsed_seconds(now, previous):
@@ -149,21 +172,18 @@ class VelocityExt:
             return time.monotonic()
 
     def _reset(self):
-        self._identity = None
-        self._last_center = None
-        self._last_sample_signature = None
-        self._last_sample_time = None
-        self._last_velocity = (0.0, 0.0, 0.0)
+        self._states.clear()
 
     def _write_header(self):
         self.output.clear()
         self.output.appendRow(self.HEADER)
         self._has_written_output = True
-        self._output_has_row = False
+        self._output_has_rows = False
 
-    def _write_row(self, row):
+    def _write_rows(self, rows):
         self.output.clear()
         self.output.appendRow(self.HEADER)
-        self.output.appendRow(row)
+        for row in rows:
+            self.output.appendRow(row)
         self._has_written_output = True
-        self._output_has_row = True
+        self._output_has_rows = bool(rows)

@@ -1,9 +1,23 @@
 # velocity (Phase 2C)
 
-`velocity` calculates current 2D image-space velocity for the one selected
-object supplied by `smoother/output`. It preserves the smoother row and appends
-three velocity fields. It does not track objects, smooth values, predict motion,
-calculate acceleration, or calculate depth velocity.
+`velocity` calculates current 2D image-space velocity for zero, one, or many
+objects supplied by `smoother/output`. It preserves every valid smoother row in
+input order and appends three velocity fields. It remains compatible with the
+original one-row `objectSelector → smoother → velocity` workflow. It does not
+track objects, smooth values, predict motion, calculate acceleration, or
+calculate depth velocity.
+
+Typical multi-object placement is:
+
+```text
+visionFusion
+    ↓
+classFilter
+    ↓
+smoother
+    ↓
+velocity
+```
 
 ## Custom parameters
 
@@ -17,8 +31,9 @@ Set `Inputdat` to `smoother/output`.
 
 ## Input and output contract
 
-The input is the at-most-one-row `smoother/output` schema. Output preserves all
-input fields as their current DAT text and appends exactly these fields:
+The input is the canonical `smoother/output` schema with zero, one, or many
+valid rows. Output preserves all original input fields as their current DAT text
+and appends exactly these fields:
 
 ```text
 source_type
@@ -65,10 +80,17 @@ velocity_y = (center_y_current - center_y_previous) / dt
 speed = sqrt(velocity_x^2 + velocity_y^2)
 ```
 
-The first valid sample after initialization or reset outputs all three velocity
-fields as `0`. State resets immediately when input is missing, header-only,
-malformed, has invalid center coordinates, or changes canonical identity. A
-target returning after a gap therefore starts again at zero velocity.
+The first valid sample for each identity outputs all three velocity fields as
+`0`. State is independent for every canonical identity `(source_type, id)`:
+each identity stores its own prior center, full-row signature, sample time, and
+last velocity. Velocity is never calculated between identities.
+
+If an identity is absent from the current valid input update, its state is
+removed immediately. Its later reappearance starts as a fresh acquisition with
+zero velocity. Missing, header-only, or schema-malformed input clears all state
+and produces header-only output. A row with invalid center coordinates is
+skipped without affecting other identities, and its prior state is removed as
+absent.
 
 The component uses TouchDesigner `absTime.seconds` as its runtime clock, with
 `time.monotonic()` only as a pure-Python fallback. It does not use source frame
@@ -76,16 +98,17 @@ metadata as time. If `dt` is non-finite or non-positive, it safely outputs zero
 velocity and stores the current center/time as a fresh baseline. A large valid
 `dt` is calculated normally; no prediction or timeout behavior is applied.
 
-An exact repeat of the full current input row is deduplicated, so repeat cooks
-do not advance velocity state. A later row with new source metadata is accepted
-even when its center is identical, producing zero instantaneous velocity for
-that interval.
+An exact repeat of each identity's full current input row is deduplicated, so
+repeat cooks do not advance that identity's baseline or affect other identities.
+A later row with changed source metadata is accepted even when its center is
+identical, producing zero instantaneous velocity for that interval.
 
 ## TouchDesigner construction
 
 1. Create a Base COMP named `velocity` and add a Table DAT named `output`.
 2. Add the **Velocity** custom page and `Inputdat` OP parameter. Set it to
-   `smoother/output`.
+   `smoother/output`; both the legacy one-row and current multi-row outputs are
+   supported.
 3. Add an extension Text DAT named `velocityExt`, set its extension class to
    `VelocityExt`, and promote it. During development, set its File parameter to:
 
