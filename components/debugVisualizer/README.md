@@ -1,8 +1,21 @@
-# debugVisualizer (Phase 3B)
+# debugVisualizer (Phase 5)
 
-`debugVisualizer` is a development/debugging helper. It prepares compact,
-canonical-coordinate DATs for a TouchDesigner-native overlay network; it does
-not process images, alter upstream data, or perform drawing in Python.
+`debugVisualizer` is a development/debugging helper for rendering zero, one,
+or many canonical objects and aggregated zones over an image. It prepares
+compact canonical-coordinate DATs for a TouchDesigner-native overlay network;
+it does not process images, alter upstream data, or perform drawing in Python.
+
+The intended multi-object inputs are `smoother/output`, `velocity/output`,
+`zoneManager/output`, and the explicit zone-definition DAT from this pipeline:
+
+```text
+visionFusion → classFilter → smoother ──→ velocity
+                                  └─────→ zoneManager
+```
+
+The controller prepares tables only. The native TouchDesigner rendering network
+must consume multiple `objectData` rows through efficient instancing or dynamic
+rendering; Python does not create per-object render operators.
 
 ## Custom parameters
 
@@ -22,8 +35,8 @@ assembled native rendering network and is not read into Python.
 ## Coordinate convention and inputs
 
 All geometry remains normalized, with origin at bottom-left, X increasing right,
-and Y increasing up. `Objectdat` is the one-row `smoother/output` schema;
-`Velocitydat` is the corresponding `velocity/output` schema; zone definitions
+and Y increasing up. `Objectdat` is the zero/one/many-row `smoother/output`
+schema; `Velocitydat` is the corresponding multi-row `velocity/output` schema; zone definitions
 use `name, x1, y1, x2, y2`; and zone state uses
 `zone, inside, entered, exited, source_type, id`.
 
@@ -36,7 +49,8 @@ it is raw relative non-metric YOLO depth.
 
 Add Table DATs named `objectData` and `zoneData` inside the component.
 
-`objectData` contains at most one row with this exact header:
+`objectData` contains one row for every valid current object, preserving
+`Objectdat` row order, with this exact header:
 
 ```text
 source_type
@@ -59,8 +73,10 @@ label
 ```
 
 The label is `<class_name> #<id>` when `class_name` is non-empty; otherwise it
-is `<source_type> #<id>`. Velocity fields stay empty unless the velocity row is
-valid and has the same `(source_type, id)` identity as the object.
+is `<source_type> #<id>`. Velocity fields stay empty unless a valid velocity
+row has the same `(source_type, id)` identity as the object. The first valid
+velocity row for a duplicate identity wins deterministically; extra velocity
+identities are ignored. This debug join does not require frame-metadata equality.
 
 `zoneData` has one row per valid unique zone definition, in first-valid table
 order:
@@ -79,8 +95,11 @@ exited
 Zones remain drawable when zone state is unavailable; their flags default to
 zero. Zones may overlap. Malformed rows and reversed bounds are skipped, the
 first valid duplicate name wins, and coordinates outside `0..1` are preserved.
-Zone state is matched by zone name only. A valid exit state from the previous
-object identity is retained rather than rejected.
+`zoneManager/output` may contain several rows for the same zone, one per
+identity. `zoneData` intentionally remains zone-level: `inside`, `entered`, and
+`exited` each equal 1 when **any** valid identity row for that zone has the
+respective flag. Identified zone-state rows take precedence over blank-identity
+legacy rows for the same zone, even when all identified flags are zero.
 
 ## Velocity visualization
 
@@ -98,38 +117,73 @@ distance representation. No depth velocity is drawn or calculated.
 ## Graceful degradation and update behavior
 
 The component is stateless and parses current input DAT contents each Frame End.
-It does not extend or recreate events. A missing/malformed object clears only
-`objectData`; a missing/malformed velocity removes only velocity fields; a
-missing/malformed zone-state DAT leaves valid zones inactive; and a missing or
-malformed zone-definition DAT clears only `zoneData`.
+It does not extend or recreate events, track identities, or create per-object
+rendering operators. A missing/malformed object clears only `objectData`; a
+missing/malformed velocity removes only velocity fields; a missing/malformed
+zone-state DAT leaves valid zones inactive; and a missing or malformed
+zone-definition DAT clears only `zoneData`.
 
-## Recommended TouchDesigner-native rendering network
+## Finalized TouchDesigner-native rendering network
 
 Use one transparent orthographic Render TOP overlay, then Composite it over the
 explicit `Imagetop`. This keeps canonical-to-render coordinate conversion at the
 rendering boundary and avoids any TOP-to-NumPy pixel round trip.
 
-1. Feed `objectData` and `zoneData` through separate DAT to CHOPs. Use Math
-   CHOPs only at this boundary to derive rectangle center/size from `x1/y1/x2/y2`.
-2. Create a unit outline rectangle SOP centered at `(0,0)` and instance it in a
-   Geometry COMP from `zoneData`; translate/scale with the derived zone CHOP.
-   Use `inside`, `entered`, and `exited` channels to drive simple instance color
-   choices (inactive, active, enter, exit).
-3. Use a second instance of that unit rectangle for the one `objectData` bbox,
-   plus a small Circle SOP or point marker at `center_x/center_y`.
-4. For velocity, use a unit horizontal Line SOP. Derive the vector
-   `velocity_end - center`, its length, and angle with Math/Analyze CHOPs;
-   translate the line to the center, rotate it, and scale it to vector length.
-   Disable this geometry when `velocity_x` is empty.
-5. Render these Geometry COMPs with an orthographic Camera COMP whose image
-   plane maps `(0,0)` to lower-left and `(1,1)` to upper-right. Set Render TOP
-   resolution to the source Image TOP resolution.
-6. Use a Text TOP for the single object label/metrics, with parameter expressions
-   reading `objectData`. For TOP-positioned text, convert at this boundary with
-   `top_y = 1 - canonical_y`. Use a Replicator COMP driven by `zoneData` to
-   create one simple Text TOP per zone name/state label, with the same Y conversion.
-7. Composite transparent Render TOP and Text TOP layers over `Imagetop` using
-   Composite TOPs set to **Over**. The final Composite TOP is the output TOP.
+### Object geometry
+
+`objectCHOP` receives `objectData` and supplies the instanced geometry path:
+
+- `bboxTransform` drives `bboxUnit` in `bboxGeometry`.
+- The same object instance data drives `centerUnit` in `centerGeometry`.
+- `velocityTransform` drives `velocityUnit` in `velocityGeometry`.
+
+This is intentionally a zero/one/many-object path. The controller does not
+construct geometry, and obsolete single-object render operators (`bboxSOP`,
+`bboxwire`, `centerSOP`, and `velocitySOP`) must not be reintroduced.
+
+Velocity uses the prepared `velocity_end - center` vector. Its endpoint uses
+the fixed visualization-only scale `VELOCITY_VISUAL_SCALE = 0.15`; it is not a
+physical prediction. Render the Geometry COMPs with an orthographic Camera
+whose image plane maps `(0,0)` to lower-left and `(1,1)` to upper-right. Set
+the Render TOP resolution to `sourceImage`.
+
+### Object labels
+
+`objectLabelReplicator`, driven by `objectData`, creates an
+`objectLabelTemplate` replica for every current row. Replica order is part of
+the maintained contract: `item1` shows `objectData` row 1, `item2` row 2, and
+`itemN` row N. Each replica contributes `out1` to `objectLabelsComposite`.
+
+Each replica's `text1` displays:
+
+```text
+<class_name> #<id>
+conf <confidence>
+depth <depth_raw>
+speed <speed>
+```
+
+Its TOP matches `sourceImage` resolution. With Horizontal Align **Left** and
+Vertical Align **Top**, position `text1` using the runtime-verified conversion:
+
+```text
+positionX = x1 * sourceImage.width + 8
+positionY = -(1.0 - y2) * sourceImage.height - 8
+```
+
+`objectLabelsComposite` includes two permanent transparent Constant TOPs so it
+remains valid when the replicator has zero object replicas. `objectLabel` and
+`labelComposite` are obsolete single-object nodes and must not be reintroduced.
+
+### Zones
+
+The existing zone visualization consumes `zoneData`. `zoneData` is aggregated
+per zone with ANY semantics for `inside`, `entered`, and `exited`. The existing
+`zoneLabelReplicator` can create one label per named zone; its callback uses the
+same pixel-position conversion above with the zone's `x1` and `y2`.
+
+Composite transparent Render TOP and Text TOP layers over `Imagetop` using
+**Over**. The final Composite TOP is the visualizer output TOP.
 
 This intentionally uses plain instanced geometry and Text TOPs: native TD
 operators render pixels, while Python only prepares small tables.
@@ -161,12 +215,23 @@ operators render pixels, while Python only prepares small tables.
    C:/Users/ruudd/tdvisionhelpers/components/debugVisualizer/debugVisualizer_execute_callbacks.py
    ```
 
-5. Assemble the native network above and expose its final Composite TOP as the
-   visualizer output. Pulse **Re-Init Extensions** after extension changes.
+5. Assemble the finalized native network: `objectCHOP`, `bboxTransform`,
+   `bboxUnit`, `bboxGeometry`, `centerUnit`, `centerGeometry`,
+   `velocityTransform`, `velocityUnit`, `velocityGeometry`,
+   `objectLabelTemplate`, `objectLabelReplicator`, and
+   `objectLabelsComposite`. Retain the existing zone visualization and
+   `zoneLabelReplicator`. Expose the final Composite TOP as the visualizer
+   output. Pulse **Re-Init Extensions** after extension changes.
+
+`objectSelector` remains compatible: its one-row output produces one object
+instance and an `item1` label replica.
 
 ## Runtime visual checklist
 
-- Confirm bbox, center, and labels align to the source TOP without flipping Y.
+- Confirm zero, one, and many objects retain `objectData` input order in the
+  bbox, center, velocity, and `itemN` label paths.
+- Confirm bbox, center, and labels align to the source TOP without flipping Y;
+  labels use the documented `x1` / `y2` pixel conversion.
 - Confirm positive X/Y velocity endpoints point right/up and may extend outside
   the image rather than being clamped.
 - Confirm mismatched velocity identity removes the vector.

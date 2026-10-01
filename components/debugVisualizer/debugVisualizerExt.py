@@ -1,10 +1,10 @@
-"""TouchDesigner extension for the Phase 3B debugVisualizer controller."""
+"""TouchDesigner extension for the Phase 5 multi-object debugVisualizer controller."""
 
 import math
 
 
 class DebugVisualizerExt:
-    """Prepare lightweight canonical DATs for a native TD debug overlay."""
+    """Prepare multi-object and aggregated-zone DATs for native TD rendering."""
 
     OBJECT_INPUT_HEADER = (
         'source_type', 'id', 'class_id', 'class_name', 'confidence',
@@ -34,13 +34,13 @@ class DebugVisualizerExt:
 
     def Update(self, force=False):
         """Reflect current valid inputs; no event or object state is retained."""
-        object_row = self._read_object(self._configured_op('Objectdat'))
-        velocity_row = self._read_velocity(self._configured_op('Velocitydat'))
+        object_rows = self._read_objects(self._configured_op('Objectdat'))
+        velocity_by_identity = self._read_velocities(self._configured_op('Velocitydat'))
         zones = self._read_zones(self._configured_op('Zonedefdat'))
         states = self._read_zone_states(self._configured_op('Zonestatedat'))
 
         if self.objectData is not None:
-            self._write_object(object_row, velocity_row)
+            self._write_objects(object_rows, velocity_by_identity)
         if self.zoneData is not None:
             self._write_zones(zones, states)
             self._update_zone_labels(zones)
@@ -54,35 +54,44 @@ class DebugVisualizerExt:
         except Exception:
             return None
 
-    def _read_object(self, dat):
-        row = self._read_first_row(dat, self.OBJECT_INPUT_HEADER)
-        if row is None:
-            return None
-        if row['source_type'] in (None, '') or row['id'] in (None, ''):
-            return None
-        geometry = tuple(
-            self._finite_number(row[column])
-            for column in ('center_x', 'center_y', 'x1', 'y1', 'x2', 'y2')
-        )
-        if any(value is None for value in geometry):
-            return None
-        row['_center'] = geometry[:2]
-        return row
+    def _read_objects(self, dat):
+        """Return every current valid canonical object row in DAT order."""
+        rows = self._read_rows(dat, self.OBJECT_INPUT_HEADER)
+        if rows is None:
+            return ()
+        valid_rows = []
+        for row in rows:
+            if row['source_type'] in (None, '') or row['id'] in (None, ''):
+                continue
+            geometry = tuple(
+                self._finite_number(row[column])
+                for column in ('center_x', 'center_y', 'x1', 'y1', 'x2', 'y2')
+            )
+            if any(value is None for value in geometry):
+                continue
+            row['_center'] = geometry[:2]
+            valid_rows.append(row)
+        return valid_rows
 
-    def _read_velocity(self, dat):
-        row = self._read_first_row(dat, self.VELOCITY_INPUT_HEADER)
-        if row is None:
-            return None
-        if row['source_type'] in (None, '') or row['id'] in (None, ''):
-            return None
-        values = tuple(
-            self._finite_number(row[column])
-            for column in ('velocity_x', 'velocity_y', 'speed')
-        )
-        if any(value is None for value in values):
-            return None
-        row['_velocity'] = values
-        return row
+    def _read_velocities(self, dat):
+        """Return first valid velocity rows keyed by canonical identity."""
+        rows = self._read_rows(dat, self.VELOCITY_INPUT_HEADER)
+        if rows is None:
+            return {}
+        velocities = {}
+        for row in rows:
+            identity = (row['source_type'], row['id'])
+            if identity[0] in (None, '') or identity[1] in (None, '') or identity in velocities:
+                continue
+            values = tuple(
+                self._finite_number(row[column])
+                for column in ('velocity_x', 'velocity_y', 'speed')
+            )
+            if any(value is None for value in values):
+                continue
+            row['_velocity'] = values
+            velocities[identity] = row
+        return velocities
 
     def _read_zones(self, dat):
         if dat is None:
@@ -128,7 +137,7 @@ class DebugVisualizerExt:
         except Exception:
             return {}
 
-        states = {}
+        state_groups = {}
         for row_index in range(1, num_rows):
             try:
                 name = dat[row_index, indices['zone']].val
@@ -138,55 +147,69 @@ class DebugVisualizerExt:
                 )
             except Exception:
                 continue
-            if name in (None, '') or name in states or any(value is None for value in flags):
+            source_type = dat[row_index, indices['source_type']].val
+            source_id = dat[row_index, indices['id']].val
+            if name in (None, '') or any(value is None for value in flags):
                 continue
-            states[name] = flags
+            if source_type in (None, '') and source_id in (None, ''):
+                group = 'legacy'
+            elif source_type not in (None, '') and source_id not in (None, ''):
+                group = 'identified'
+            else:
+                continue
+            grouped = state_groups.setdefault(name, {
+                'identified': [0, 0, 0], 'legacy': [0, 0, 0],
+                'identified_present': False,
+            })
+            if group == 'identified':
+                grouped['identified_present'] = True
+            for index, flag in enumerate(flags):
+                grouped[group][index] = int(bool(grouped[group][index] or flag))
+
+        states = {}
+        for name, grouped in state_groups.items():
+            states[name] = tuple(
+                grouped['identified'] if grouped['identified_present'] else grouped['legacy'])
         return states
 
     @staticmethod
-    def _read_first_row(dat, required_columns):
+    def _read_rows(dat, required_columns):
         if dat is None:
             return None
         try:
             headers = [cell.val for cell in dat.row(0)]
             indices = {column: headers.index(column) for column in required_columns}
-            if dat.numRows < 2:
-                return None
-            return {column: dat[1, index].val for column, index in indices.items()}
+            return [
+                {column: dat[row_index, index].val for column, index in indices.items()}
+                for row_index in range(1, dat.numRows)
+            ]
         except Exception:
             return None
 
-    def _write_object(self, object_row, velocity_row):
+    def _write_objects(self, object_rows, velocity_by_identity):
         self.objectData.clear()
         self.objectData.appendRow(self.OBJECT_HEADER)
-        if object_row is None:
-            return
-
-        velocity = None
-        if velocity_row is not None and (
-            velocity_row['source_type'], velocity_row['id']
-        ) == (object_row['source_type'], object_row['id']):
-            velocity = velocity_row['_velocity']
-
-        velocity_fields = ('', '', '', '', '')
-        if velocity is not None:
-            velocity_x, velocity_y, speed = velocity
-            velocity_fields = (
-                velocity_row['velocity_x'], velocity_row['velocity_y'],
-                self._format_number(object_row['_center'][0] + velocity_x * self.VELOCITY_VISUAL_SCALE),
-                self._format_number(object_row['_center'][1] + velocity_y * self.VELOCITY_VISUAL_SCALE),
-                velocity_row['speed'],
-            )
-
-        class_name = object_row['class_name']
-        label_prefix = class_name if class_name not in (None, '') else object_row['source_type']
-        self.objectData.appendRow((
-            object_row['source_type'], object_row['id'], class_name,
-            object_row['confidence'], object_row['depth_raw'],
-            object_row['center_x'], object_row['center_y'],
-            object_row['x1'], object_row['y1'], object_row['x2'], object_row['y2'],
-            *velocity_fields, '{} #{}'.format(label_prefix, object_row['id']),
-        ))
+        for object_row in object_rows:
+            velocity_row = velocity_by_identity.get(
+                (object_row['source_type'], object_row['id']))
+            velocity_fields = ('', '', '', '', '')
+            if velocity_row is not None:
+                velocity_x, velocity_y, _ = velocity_row['_velocity']
+                velocity_fields = (
+                    velocity_row['velocity_x'], velocity_row['velocity_y'],
+                    self._format_number(object_row['_center'][0] + velocity_x * self.VELOCITY_VISUAL_SCALE),
+                    self._format_number(object_row['_center'][1] + velocity_y * self.VELOCITY_VISUAL_SCALE),
+                    velocity_row['speed'],
+                )
+            class_name = object_row['class_name']
+            label_prefix = class_name if class_name not in (None, '') else object_row['source_type']
+            self.objectData.appendRow((
+                object_row['source_type'], object_row['id'], class_name,
+                object_row['confidence'], object_row['depth_raw'],
+                object_row['center_x'], object_row['center_y'],
+                object_row['x1'], object_row['y1'], object_row['x2'], object_row['y2'],
+                *velocity_fields, '{} #{}'.format(label_prefix, object_row['id']),
+            ))
 
     def _write_zones(self, zones, states):
         self.zoneData.clear()
