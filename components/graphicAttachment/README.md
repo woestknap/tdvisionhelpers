@@ -1,22 +1,25 @@
 # graphicAttachment
 
-`graphicAttachment` prepares multi-person display transforms for one supplied
-graphic TOP. It consumes `attachmentTransform/transformData`; it does not
-interpret poses, track identities, select graphics, or render pixels in Python.
+`graphicAttachment` resolves current attachment transforms to graphic TOP
+sources and prepares data for a native replicated TouchDesigner rendering
+network. It does not render pixels, track identities, select graphics, or
+associate poses to objects. Canonical identity is `(source_type, id)`.
 
-Each valid transform row becomes one `graphicTransformData` row in the same
-order. Identity is preserved as `(source_type, id)`; duplicate IDs are not
-deduplicated.
+It accepts zero, one, or many transform rows in input order. Multiple anchor
+rows for the same identity share that identity's assigned graphic source.
 
 ## Public parameters
 
-Create these Base COMP parameters:
+Create these parameters on the existing custom parameter page:
 
 | Label | Internal name | Type | Default |
 | --- | --- | --- | --- |
 | Image TOP | `Imagetop` | OP | — |
 | Graphic TOP | `Graphictop` | OP | — |
-| Transform DAT | `Transformdat` | OP | `attachmentTransform/transformData` |
+| Transform DAT | `Transformdat` | OP | `transformStabilizer/transformData` |
+| Assignments DAT | `Assignmentsdat` | OP | `graphicSelector/assignmentData` |
+| Sources DAT | `Sourcesdat` | OP | `graphicsSources` |
+| Multi Source | `Multisource` | Toggle | On |
 | Scale Multiplier | `Scalemultiplier` | Float | `1.0` |
 | Rotation Offset | `Rotationoffset` | Float, degrees | `0.0` |
 | X Offset | `Xoffset` | Float, normalized | `0.0` |
@@ -24,21 +27,55 @@ Create these Base COMP parameters:
 | Opacity | `Opacity` | Float | `1.0` |
 | Show Graphic | `Showgraphic` | Toggle | On |
 
-`Opacity` is logically clamped to `0..1`. Missing image or graphic TOPs do not
-stop data preparation; they only prevent the future native visual network from
-rendering until those inputs are supplied.
+`Opacity` is clamped to `0..1`. `Showgraphic` handles normal TouchDesigner
+Toggle booleans: Off makes every prepared row non-visible.
 
-## Prepared data
+With `Multisource` On, `Assignmentsdat` and `Sourcesdat` resolve each graphic.
+With it Off, previous one-`Graphictop` behaviour is preserved: native rendering
+uses `Graphictop` and its absence does not make rows non-visible. In this mode
+`graphic_index` and `graphic_name` are blank; `graphic_top` is optionally the
+configured TOP path.
 
-Add a root Table DAT named `graphicTransformData`. It always has this exact
-header:
+## Input contracts
+
+`Transformdat` expects:
 
 ```text
-source_type,id,anchor,x,y,scale,rotation,opacity,visible,source_frame,source_seq,video_frame
+source_type,id,anchor,x,y,scale,rotation,confidence,visible,source_frame,source_seq,video_frame
 ```
 
-Coordinates remain normalized with origin bottom-left, X right, Y up. For every
-valid transform row:
+`Assignmentsdat` expects:
+
+```text
+source_type,id,graphic_index,graphic_name,visible,source_frame,source_seq,video_frame
+```
+
+Create a root Table DAT `graphicsSources` with exactly:
+
+```text
+name,top
+```
+
+Each physical data-row position is its graphic slot: the first data row is
+`graphic_index=0`, the second is `1`, and so on. Keep blank/disabled slots in
+place; the controller never compacts or renumbers this table. A valid registry
+name overrides the assignment's `graphic_name`. An empty `top`, missing slot,
+or invalid assignment makes the transform non-visible. Duplicate assignment
+identities use the first valid assignment row.
+
+## Prepared tables
+
+Create these root Table DATs.
+
+### `graphicTransformData`
+
+It always has this exact schema:
+
+```text
+source_type,id,anchor,x,y,scale,rotation,opacity,visible,graphic_index,graphic_name,graphic_top,source_frame,source_seq,video_frame
+```
+
+Coordinates remain normalized: origin bottom-left, X right, Y up.
 
 ```text
 x        = input_x + Xoffset
@@ -48,60 +85,73 @@ rotation = input_rotation + Rotationoffset
 opacity  = clamp(Opacity, 0, 1)
 ```
 
-Rotation remains degrees; positive is counter-clockwise and zero points toward
-+X. Scale remains normalized image-space scale. In particular, point-mode
-transforms from `attachmentTransform` have scale `1.0`; use a smaller
-`Scalemultiplier` when that is visually appropriate. This component never
-infers point versus segment mode.
+In multi-source mode, the assignment joins strictly by `(source_type, id)`.
+Its physical `graphic_index` selects `graphicsSources`; the registry provides
+the output `graphic_name` and `graphic_top`. Assignment visibility, a non-empty
+resolved TOP, valid transform numbers, source visibility, and `Showgraphic`
+must all be true for `visible=1`. A missing or malformed join preserves the
+transform row but blanks the graphic fields and sets `visible=0`.
 
-`visible` is `1` only when source `visible` equals `1`, `Showgraphic` is on,
-and `x`, `y`, `scale`, `rotation`, and `confidence` are all finite. It never
-drops a row merely because `visible=0`.
+Missing, header-only, or malformed transform input produces a header-only
+prepared table. A malformed transform row does not affect its siblings.
 
-When individual numeric transform fields are malformed, available fields are
-still transformed and unavailable fields are blank; the row is non-visible.
-This preserves usable metadata without fabricating a transform. Numeric zero is
-valid. Missing/header-only/malformed `Transformdat` produces a header-only
-output and clears stale rows.
+### `graphicReplicas`
 
-## Recommended native TouchDesigner network
+This root Table DAT has exactly one column:
 
-1. Use Select TOPs to bring `Imagetop` and `Graphictop` into the component.
-2. Convert `graphicTransformData` with DAT to CHOP (or a Script CHOP).
-3. Create one unit Rectangle SOP/quad and one Geometry COMP. Instance it from
-   the CHOP: position from `x/y`, rotation from `rotation`, scale from `scale`,
-   and enable/visibility from `visible`.
-4. Apply a texture/material fed by `Graphictop`. Keep `opacity` available as an
-   instance channel. Basic material paths may not support per-instance opacity
-   directly; retain the channel rather than adding shader complexity here.
-5. Render with an orthographic camera using normalized bottom-left coordinates,
-   set Render TOP resolution dynamically from `Imagetop`, Composite it **Over**
-   the image, and expose an Out TOP.
+```text
+name
+```
 
-This supports zero, one, or many graphic instances without fixed person counts
-or one Geometry COMP per person.
+It contains `item1` through `itemN` for the number of currently visible
+prepared rows. It is rewritten only when that visible count changes, avoiding
+Replicator rebuilds for ordinary transform updates.
 
-## Deliberate exclusions
+### `graphicReplicaMap`
 
-No random/per-person graphic selection, animation, tracking, smoothing, depth
-occlusion, object-pose association, face landmarks, FM effects, shaders, masks,
-segmentation, collision avoidance, or persistence across tracker changes is
-implemented.
+This root Table DAT has exactly:
 
-## Manual TouchDesigner setup
+```text
+replica_index,transform_row
+```
 
-1. Create Base COMP `graphicAttachment` and add the parameters above.
-2. Add Table DAT `graphicTransformData`.
-3. Add Text DAT `graphicAttachmentExt` from `graphicAttachmentExt.py`, set its
-   extension class to `GraphicAttachmentExt`, promote it, and use:
+It is refreshed every frame. `replica_index` is the zero-based visible-replica
+position; `transform_row` is the zero-based data-row position in
+`graphicTransformData` (excluding its header). This maps a sequential replica
+to the correct potentially non-contiguous visible transform row.
 
-   ```python
-   me.op('graphicAttachmentExt').module.GraphicAttachmentExt(me)
-   ```
+## Native TouchDesigner rendering setup
 
-4. Add an Execute DAT using `graphicAttachment_execute_callbacks.py`; enable
-   **Frame End**.
-5. Point `Transformdat` at `attachmentTransform/transformData`, choose image
-   and graphic TOPs, then construct the native network above. Test offsets,
-   scale, rotation, opacity clamping, source visibility, Show Graphic, duplicate
-   IDs, malformed values, and zero/many transform rows.
+1. Add root Tables `graphicsSources`, `graphicTransformData`,
+   `graphicReplicas`, and `graphicReplicaMap` with the exact schemas above.
+2. Configure stable physical source slots in `graphicsSources`; point
+   `Assignmentsdat` to `graphicSelector/assignmentData`, `Sourcesdat` to the
+   registry, and `Transformdat` to `transformStabilizer/transformData`.
+3. Use `graphicReplicas` as a Replicator COMP Template DAT. Its replicas are
+   `item1`, `item2`, and so on.
+4. In the replica callback, use `graphicReplicaMap` to map its zero-based item
+   number to the required `graphicTransformData` data row. Feed that row's
+   `graphic_top`, x/y/scale/rotation/opacity into the native transform and
+   composite network.
+5. Keep the existing `Graphictop` path for `Multisource` Off. Do not use the
+   live transform table as the Replicator template.
+6. Render in normalized bottom-left image coordinates, use `Imagetop` for
+   output resolution, and Composite graphics Over the image.
+
+## Extension setup and checks
+
+Add a Text DAT from `graphicAttachmentExt.py`, set its extension class to
+`GraphicAttachmentExt`, and use:
+
+```python
+me.op('graphicAttachmentExt').module.GraphicAttachmentExt(me)
+```
+
+Add an Execute DAT using `graphicAttachment_execute_callbacks.py` and enable
+**Frame End**.
+
+Manually test distinct slots for two identities, several anchors for one
+identity, hidden assignments, blank source TOPs, missing/invalid indices,
+duplicate assignment identities, and blank intermediate registry rows. Verify
+that physical slot indices do not shift, only visible-count changes rebuild
+replicas, and the map follows non-contiguous visible transform rows.
