@@ -53,6 +53,8 @@ class TransformStabilizerExt:
 
     def _enabled(self):
         value = self._configured_op('Enabled')
+        if isinstance(value, bool):
+            return value
         number = self._finite_number(value)
         if number is not None:
             return number != 0.0
