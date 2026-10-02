@@ -20,6 +20,7 @@ Create these parameters on the Base COMP:
 | Point | `Point` | Menu/String | `nose` |
 | Point A | `Pointa` | Menu/String | `left_shoulder` |
 | Point B | `Pointb` | Menu/String | `right_shoulder` |
+| Scale Mode | `Scalemode` | Menu | `fixed` |
 | Min Confidence | `Minconfidence` | Float | `0.25` |
 
 `Mode` options are `point` and `segment`. Valid keypoint names are:
@@ -53,10 +54,24 @@ With `Mode = point`, `Point` selects a keypoint. A valid selected point writes:
 ```text
 anchor = Point
 x, y = selected keypoint x, y
-scale = 1.0
 rotation = 0.0
 confidence = selected keypoint confidence
 ```
+
+`Scalemode` controls point-mode scale only:
+
+| Scale mode | Point-mode scale |
+| --- | --- |
+| `fixed` | `1.0` (the backward-compatible default) |
+| `bbox_width` | `max(0, x2 - x1)` from the matching pose bbox |
+| `bbox_height` | `max(0, y2 - y1)` from the matching pose bbox |
+| `bbox_size` | `sqrt(width * height)` from the matching pose bbox |
+
+`bbox_size` provides approximate image-space perspective/distance scaling: a
+smaller detected person produces a smaller scale. It remains normalized and is
+not metric distance. Bbox matching uses `(source_type, id)`, never row number.
+If a non-fixed mode has no valid matching bbox, the pose row remains with
+`scale=0` and `visible=0`; it never silently falls back to `1.0`.
 
 `visible` is `1` only when its confidence is at least `Minconfidence`. A
 low-confidence but numerically valid point still retains its transform values
@@ -86,6 +101,7 @@ and is not normalized again.
 Both points must be valid and meet `Minconfidence` for `visible=1`. If either
 is low-confidence but valid, the transform remains computed with `visible=0`.
 If either is missing/malformed, transform fields are blank and `visible=0`.
+`Scalemode` does not affect segment mode.
 
 Examples: `left_shoulder -> right_shoulder` gives a shoulder-width/rotation
 transform; `left_eye -> right_eye` gives an eye-line transform.
@@ -109,7 +125,9 @@ create per-person random effects.
 ## Manual TouchDesigner setup
 
 1. Create a Base COMP named `attachmentTransform`.
-2. Add the parameters above and a root Table DAT named `transformData`.
+2. Add the parameters above, including the `Scalemode` menu (`fixed`,
+   `bbox_width`, `bbox_height`, `bbox_size`), and a root Table DAT named
+   `transformData`.
 3. Add a Text DAT named `attachmentTransformExt` from
    `attachmentTransformExt.py`, set its extension class to
    `AttachmentTransformExt`, promote it, and use:

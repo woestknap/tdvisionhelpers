@@ -35,12 +35,18 @@ class AttachmentTransformExt:
         point = self._keypoint_name('Point')
         point_a = self._keypoint_name('Pointa')
         point_b = self._keypoint_name('Pointb')
+        scale_mode = self._scale_mode()
         min_confidence = self._min_confidence()
-        poses = self._read_poses(self._configured_op('Posesdat'))
+        poses = self._read_poses(
+            self._configured_op('Posesdat'),
+            require_valid_bbox=not (mode == 'point' and scale_mode != 'fixed'),
+        )
         keypoints = self._first_keypoints_by_identity_and_name(
             self._configured_op('Keypointsdat'))
+        pose_boxes = self._first_pose_boxes_by_identity(poses)
         self._write_transforms(
-            poses, keypoints, mode, point, point_a, point_b, min_confidence)
+            poses, keypoints, pose_boxes, mode, point, point_a, point_b,
+            scale_mode, min_confidence)
 
     def _configured_op(self, parameter_name):
         parameter = getattr(self.ownerComp.par, parameter_name, None)
@@ -72,11 +78,15 @@ class AttachmentTransformExt:
         name = self._parameter_text(parameter_name)
         return name if name in self.KEYPOINT_NAMES else None
 
+    def _scale_mode(self):
+        mode = self._parameter_text('Scalemode').lower()
+        return mode if mode in ('fixed', 'bbox_width', 'bbox_height', 'bbox_size') else 'fixed'
+
     def _min_confidence(self):
         value = self._finite_number(self._configured_parameter_value('Minconfidence'))
         return 0.25 if value is None else value
 
-    def _read_poses(self, dat):
+    def _read_poses(self, dat, require_valid_bbox=True):
         rows = self._read_rows(dat, self.POSES_INPUT_HEADER)
         if rows is None:
             return ()
@@ -85,12 +95,27 @@ class AttachmentTransformExt:
         for row in rows:
             if row['source_type'] != 'pose' or row['id'] in (None, ''):
                 continue
-            if self._finite_values(
-                row['confidence'], row['x1'], row['y1'], row['x2'], row['y2'],
-            ) is None:
+            if self._finite_number(row['confidence']) is None:
                 continue
+            bbox = self._bbox(row)
+            if require_valid_bbox and bbox is None:
+                continue
+            row['_bbox'] = bbox
             valid_rows.append(row)
         return valid_rows
+
+    def _first_pose_boxes_by_identity(self, poses):
+        boxes = {}
+        for pose in poses:
+            if pose['_bbox'] is not None:
+                boxes.setdefault((pose['source_type'], pose['id']), pose['_bbox'])
+        return boxes
+
+    def _bbox(self, pose):
+        values = self._finite_values(pose['x1'], pose['y1'], pose['x2'], pose['y2'])
+        if values is None:
+            return None
+        return values
 
     @staticmethod
     def _read_rows(dat, required_columns):
@@ -128,14 +153,16 @@ class AttachmentTransformExt:
         return keypoints
 
     def _write_transforms(
-            self, poses, keypoints, mode, point, point_a, point_b, min_confidence):
+            self, poses, keypoints, pose_boxes, mode, point, point_a, point_b,
+            scale_mode, min_confidence):
         if self.transformData is None:
             return
         self.transformData.clear()
         self.transformData.appendRow(self.TRANSFORM_HEADER)
         for pose in poses:
             if mode == 'point':
-                values = self._point_transform(pose, keypoints, point, min_confidence)
+                values = self._point_transform(
+                    pose, keypoints, pose_boxes, point, scale_mode, min_confidence)
             elif mode == 'segment':
                 values = self._segment_transform(
                     pose, keypoints, point_a, point_b, min_confidence)
@@ -148,17 +175,35 @@ class AttachmentTransformExt:
                 pose['video_frame'],
             ))
 
-    def _point_transform(self, pose, keypoints, point, min_confidence):
+    def _point_transform(
+            self, pose, keypoints, pose_boxes, point, scale_mode, min_confidence):
         if point is None:
             return ('', '', '', '', '', '', 0)
         keypoint = keypoints.get((pose['source_type'], pose['id'], point))
         if keypoint is None:
             return (point, '', '', '', '', '', 0)
         x, y, confidence, _, _, numeric_confidence = keypoint
+        scale, valid_scale = self._point_scale(pose, pose_boxes, scale_mode)
         return (
-            point, x, y, 1.0, 0.0, confidence,
-            int(numeric_confidence >= min_confidence),
+            point, x, y, scale, 0.0, confidence,
+            int(valid_scale and numeric_confidence >= min_confidence),
         )
+
+    @staticmethod
+    def _point_scale(pose, pose_boxes, scale_mode):
+        if scale_mode == 'fixed':
+            return 1.0, True
+        bbox = pose_boxes.get((pose['source_type'], pose['id']))
+        if bbox is None:
+            return 0.0, False
+        x1, y1, x2, y2 = bbox
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        if scale_mode == 'bbox_width':
+            return width, True
+        if scale_mode == 'bbox_height':
+            return height, True
+        return math.sqrt(width * height), True
 
     def _segment_transform(self, pose, keypoints, point_a, point_b, min_confidence):
         if point_a is None or point_b is None:
